@@ -33,18 +33,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
+import java.util.*;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -112,7 +102,7 @@ public class StoreService implements MetricsAgent {
         this.downloadThreadCount = 8;
         this.downloadExecutor =
                 new ThreadPoolExecutor(
-                        1,
+                        0,
                         downloadThreadCount,
                         0L,
                         TimeUnit.MILLISECONDS,
@@ -297,42 +287,55 @@ public class StoreService implements MetricsAgent {
                 () -> {
                     try {
                         logger.info("ingest data [" + path + "]");
-                        //ingestDataInternal(path);
-                        ingestDataInternalMultiThread(path, tasks);
-                        callback.onCompleted(null);
+                        ingestDataInternal(path, callback);
+//                        ingestDataInternalMultiThread(path, tasks);
+//                        callback.onCompleted(null);
                     } catch (Exception e) {
                         logger.error("ingest data failed. path [" + path + "]", e);
                         callback.onError(e);
                     }
                 });
     }
-
-    private void ingestDataInternalMultiThread(String path,
-              ArrayList<Map<Integer, GraphPartition>> tasks) throws IOException {
-        for (int i=0; i<downloadThreadCount; i++) {
-            this.downloadExecutor.execute(
-                () -> {
-                    try {
-                        ingestDataInternal(path, tasks.get(i));
-                    } catch (IOException e) {
-                        logger.error("download data failed. path [" + path + "]", e);
-                        throw e;
-                    }
-                });
-        }
-    }
+//
+//    private void ingestDataInternalMultiThread(String path,
+//              ArrayList<Map<Integer, GraphPartition>> tasks) throws IOException {
+//        for (int i=0; i<downloadThreadCount; i++) {
+//            this.downloadExecutor.execute(
+//                () -> {
+//                    try {
+//                        ingestDataInternal(path, tasks.get(i));
+//                    } catch (IOException e) {
+//                        logger.error("download data failed. path [" + path + "]", e);
+//                        throw e;
+//                    }
+//                });
+//        }
+//    }
 
     //private void ingestDataInternal(String path) throws IOException {
-    private void ingestDataInternal(String path,
-                             Map<Integer, GraphPartition> task) throws IOException {
+    private void ingestDataInternal(String path, CompletionCallback<Void> callback) throws IOException {
         ExternalStorage externalStorage = ExternalStorage.getStorage(configs, path);
-        //for (Map.Entry<Integer, GraphPartition> entry : this.idToPartition.entrySet()) {
-        for (Map.Entry<Integer, GraphPartition> entry : task.entrySet()) {
+        Set<Map.Entry<Integer, GraphPartition>> entries = this.idToPartition.entrySet();
+        AtomicInteger counter = new AtomicInteger(entries.size());
+        AtomicBoolean finished = new AtomicBoolean(false);
+        for (Map.Entry<Integer, GraphPartition> entry : entries) {
             int pid = entry.getKey();
             GraphPartition partition = entry.getValue();
             String fileName = "part-r-" + String.format("%05d", pid) + ".sst";
             String fullPath = path + "/" + fileName;
-            partition.ingestExternalFile(externalStorage, fullPath);
+            this.downloadExecutor.execute(() -> {
+                try {
+                    partition.ingestExternalFile(externalStorage, fullPath);
+                } catch (IOException e) {
+                    if (!finished.getAndSet(true)) {
+                        callback.onError(e);
+                    }
+                }
+                if (counter.decrementAndGet() == 0) {
+                    finished.set(true);
+                    callback.onCompleted(null);
+                }
+            });
         }
     }
 
