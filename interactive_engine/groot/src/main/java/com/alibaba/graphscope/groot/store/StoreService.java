@@ -33,6 +33,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -57,9 +58,11 @@ public class StoreService implements MetricsAgent {
     private Configs configs;
     private int storeId;
     private int writeThreadCount;
+    private int downloadThreadCount;
     private MetaService metaService;
     private Map<Integer, GraphPartition> idToPartition;
     private ExecutorService writeExecutor, ingestExecutor;
+    private ExecutorService downloadExecutor;
     private volatile boolean shouldStop = true;
 
     private volatile long lastUpdateTime;
@@ -106,6 +109,16 @@ public class StoreService implements MetricsAgent {
                         new LinkedBlockingQueue<>(1),
                         ThreadFactoryUtils.daemonThreadFactoryWithLogExceptionHandler(
                                 "store-ingest", logger));
+        this.downloadThreadCount = 8;
+        this.downloadExecutor =
+                new ThreadPoolExecutor(
+                        1,
+                        downloadThreadCount,
+                        0L,
+                        TimeUnit.MILLISECONDS,
+                        new LinkedBlockingQueue<>(),
+                        ThreadFactoryUtils.daemonThreadFactoryWithLogExceptionHandler(
+                                "store-download", logger));
         logger.info("StoreService started. storeId [" + this.storeId + "]");
     }
 
@@ -269,11 +282,23 @@ public class StoreService implements MetricsAgent {
     }
 
     public void ingestData(String path, CompletionCallback<Void> callback) {
+        ArrayList<Map<Integer, GraphPartition>> tasks =
+                     new ArrayList<Map<Integer, GraphPartition>>(downloadThreadCount);
+        int index = 0;
+        for (Map.Entry<Integer, GraphPartition> entry : this.idToPartition.entrySet()) {
+            tasks.get(index % downloadThreadCount).put(entry.getKey(), entry.getValue());
+            index += 1;
+        }
+        System.out.println("tot_size: "+this.idToPartition.size());
+        for (int i=0; i<downloadThreadCount; i++) {
+            System.out.println("task.size: "+tasks.get(i).size());
+        }
         this.ingestExecutor.execute(
                 () -> {
                     try {
                         logger.info("ingest data [" + path + "]");
-                        ingestDataInternal(path);
+                        //ingestDataInternal(path);
+                        ingestDataInternalMultiThread(path, tasks);
                         callback.onCompleted(null);
                     } catch (Exception e) {
                         logger.error("ingest data failed. path [" + path + "]", e);
@@ -282,9 +307,27 @@ public class StoreService implements MetricsAgent {
                 });
     }
 
-    private void ingestDataInternal(String path) throws IOException {
+    private void ingestDataInternalMultiThread(String path,
+              ArrayList<Map<Integer, GraphPartition>> tasks) throws IOException {
+        for (int i=0; i<downloadThreadCount; i++) {
+            this.downloadExecutor.execute(
+                () -> {
+                    try {
+                        ingestDataInternal(path, tasks.get(i));
+                    } catch (IOException e) {
+                        logger.error("download data failed. path [" + path + "]", e);
+                        throw e;
+                    }
+                });
+        }
+    }
+
+    //private void ingestDataInternal(String path) throws IOException {
+    private void ingestDataInternal(String path,
+                             Map<Integer, GraphPartition> task) throws IOException {
         ExternalStorage externalStorage = ExternalStorage.getStorage(configs, path);
-        for (Map.Entry<Integer, GraphPartition> entry : this.idToPartition.entrySet()) {
+        //for (Map.Entry<Integer, GraphPartition> entry : this.idToPartition.entrySet()) {
+        for (Map.Entry<Integer, GraphPartition> entry : task.entrySet()) {
             int pid = entry.getKey();
             GraphPartition partition = entry.getValue();
             String fileName = "part-r-" + String.format("%05d", pid) + ".sst";
