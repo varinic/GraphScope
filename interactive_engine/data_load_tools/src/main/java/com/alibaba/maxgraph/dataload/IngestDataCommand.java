@@ -6,12 +6,17 @@ import java.io.IOException;
 
 public class IngestDataCommand extends DataCommand {
 
-    public IngestDataCommand(String dataPath) throws IOException {
-        super(dataPath);
+    public IngestDataCommand(String dataPath, boolean is_oss) throws IOException {
+        super(dataPath, is_oss);
     }
 
     public void run() {
-        MaxGraphClient client = MaxGraphClient.newBuilder().setHosts(graphEndpoint).build();
+        MaxGraphClient client =
+                MaxGraphClient.newBuilder()
+                        .setHosts(graphEndpoint)
+                        .setUsername(username)
+                        .setPassword(password)
+                        .build();
         client.ingestData(dataPath);
     }
 }
